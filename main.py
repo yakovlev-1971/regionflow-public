@@ -429,7 +429,6 @@ def deduplicate(items, max_diff_minutes_first=60, max_diff_minutes_second=720, m
 
     sorted_items = sorted(items, key=lambda x: x.get("timestamp", 0) or 0, reverse=True)
 
-    # Первый проход — жёсткий
     result_first = []
     seen_first = []
     for item in sorted_items:
@@ -449,7 +448,6 @@ def deduplicate(items, max_diff_minutes_first=60, max_diff_minutes_second=720, m
             result_first.append(item)
             seen_first.append((norm, ts))
 
-    # Второй проход — мягкий
     result_second = []
     seen_second = []
     for item in result_first:
@@ -566,7 +564,7 @@ if time.time() - st.session_state.last_auto_refresh > AUTO_REFRESH:
     st.rerun()
 
 st.title("RegionFlow — Хроника дня")
-st.caption("Новости Орловской области в хронологическом порядке")
+st.markdown("<p style='font-size: 1.1rem; color: #666;'>Новости Орловской области в хронологическом порядке</p>", unsafe_allow_html=True)
 
 col_btn, col_share = st.columns([1, 1])
 with col_btn:
@@ -582,11 +580,44 @@ with col_share:
 
 data = load_news()
 
-col1, col2 = st.columns(2)
-with col1:
-    st.metric("Свежих (за час)", data["fresh_count"])
-with col2:
-    st.metric("Всего за 12 часов", data["total_count"])
+st.markdown("""
+<style>
+.metrics-row {
+    display: flex;
+    gap: 1rem;
+    margin: 1rem 0;
+}
+.metric-box {
+    flex: 1;
+    padding: 0.6rem 0.5rem;
+    border-radius: 0.5rem;
+    background: #f0f2f6;
+    text-align: center;
+}
+.metric-number {
+    font-size: 1.2rem;
+    font-weight: bold;
+    color: #1a1a1a;
+}
+.metric-label {
+    font-size: 0.8rem;
+    color: #666;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown(f"""
+<div class="metrics-row">
+    <div class="metric-box">
+        <div class="metric-number">{data['fresh_count']}</div>
+        <div class="metric-label">Свежих новостей (за час)</div>
+    </div>
+    <div class="metric-box">
+        <div class="metric-number">{data['total_count']}</div>
+        <div class="metric-label">Всего за 12 часов</div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
 st.divider()
 
