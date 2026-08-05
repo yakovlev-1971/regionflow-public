@@ -4,7 +4,6 @@ import requests
 import re
 import time
 from datetime import datetime, timezone, timedelta
-from collections import defaultdict
 from bs4 import BeautifulSoup
 
 # ──────────────────────────────────────────────────────────
@@ -19,17 +18,13 @@ st.set_page_config(
 
 MSK = timezone(timedelta(hours=3))
 
-# Окна времени
-FRESH_WINDOW = 1 * 3600      # 1 час
-TOTAL_WINDOW = 24 * 3600     # 24 часа
+FRESH_WINDOW = 1 * 3600       # 1 час
+TOTAL_WINDOW = 12 * 3600      # 12 часов (вместо 24)
 
-# Период автообновления (секунды)
-AUTO_REFRESH = 600  # 10 минут
+AUTO_REFRESH = 600            # 10 минут
+CACHE_TTL = 600               # кэш на 10 минут
 
-# VK-токен из секретов Streamlit
 VK_TOKEN = st.secrets.get("VK_TOKEN", "")
-
-# Базовый URL приложения (замени на реальный после деплоя)
 APP_URL = "https://regionflow-public.streamlit.app/"
 
 # ──────────────────────────────────────────────────────────
@@ -204,14 +199,14 @@ def format_time(timestamp):
         return ""
 
 # ──────────────────────────────────────────────────────────
-# ФУНКЦИИ СБОРА НОВОСТЕЙ (ядро, общее с main.py)
+# ФУНКЦИИ СБОРА НОВОСТЕЙ
 # ──────────────────────────────────────────────────────────
 
 def parse_rss_items(name, url):
     items = []
     try:
         feed = feedparser.parse(url)
-        for entry in feed.entries[:5]:
+        for entry in feed.entries[:3]:
             title = entry.get("title", "").strip()
             if title and not is_garbage_title(title):
                 pub_ts = None
@@ -246,7 +241,7 @@ def fetch_vk_channel(screen_name, name):
             owner_id = -owner_id
         wall = requests.get(
             "https://api.vk.com/method/wall.get",
-            params={"owner_id": owner_id, "count": 10, "access_token": VK_TOKEN, "v": "5.131"},
+            params={"owner_id": owner_id, "count": 5, "access_token": VK_TOKEN, "v": "5.131"},
             timeout=10
         ).json()
         if "error" in wall or "response" not in wall or "items" not in wall["response"]:
@@ -287,7 +282,7 @@ def parse_abireg_html(name, url):
         articles = soup.find_all("article")
         if not articles:
             articles = soup.find_all("div", class_=re.compile("news"))
-        for article in articles[:10]:
+        for article in articles[:5]:
             title_tag = article.find("h2") or article.find("h3") or article.find("a")
             if not title_tag:
                 continue
@@ -330,7 +325,7 @@ def parse_ksp_news(name, url):
             "мая": "05", "июня": "06", "июля": "07", "августа": "08",
             "сентября": "09", "октября": "10", "ноября": "11", "декабря": "12"
         }
-        for page_num in range(1, 4):
+        for page_num in range(1, 3):
             page_url = url if page_num == 1 else f"{url}page{page_num}"
             response = requests.get(page_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
             if response.status_code != 200:
@@ -379,7 +374,7 @@ def parse_ksp_news(name, url):
                         "timestamp": None,
                         "sort_date": sort_date
                     })
-            if len(items) < 5:
+            if len(items) < 3:
                 break
     except:
         pass
@@ -445,10 +440,10 @@ def deduplicate(items, max_diff_minutes=60, max_levenshtein=3):
     return result
 
 # ──────────────────────────────────────────────────────────
-# ЗАГРУЗКА НОВОСТЕЙ (с кэшем на 5 минут)
+# ЗАГРУЗКА НОВОСТЕЙ (с кэшем на 10 минут)
 # ──────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def load_news():
     all_items = []
 
@@ -478,7 +473,7 @@ def load_news():
     # Дедупликация
     all_items = deduplicate(all_items)
 
-    # Сортировка по времени (свежие первыми)
+    # Сортировка по времени
     def sort_key(item):
         ts = item.get("timestamp")
         if ts and isinstance(ts, (int, float)):
@@ -535,7 +530,6 @@ def load_news():
 # UI
 # ──────────────────────────────────────────────────────────
 
-# Автообновление
 if "last_auto_refresh" not in st.session_state:
     st.session_state.last_auto_refresh = time.time()
 
@@ -565,7 +559,7 @@ col1, col2 = st.columns(2)
 with col1:
     st.metric("Свежих (за час)", data["fresh_count"])
 with col2:
-    st.metric("Всего за 24 часа", data["total_count"])
+    st.metric("Всего за 12 часов", data["total_count"])
 
 st.divider()
 
@@ -574,7 +568,7 @@ if data["chrono_items"]:
         time_str = f"`{item['time']}` " if item.get("time") else ""
         st.markdown(f"{time_str}[{item['title']}]({item['link']}) — *{item['source']}*")
 else:
-    st.info("Нет новостей за последние 24 часа")
+    st.info("Нет новостей за последние 12 часов")
 
 st.divider()
 st.caption(f"RegionFlow • (c) Denis Yakovlev, 2026 • Обновлено: {data['timestamp']}")
