@@ -19,7 +19,7 @@ st.set_page_config(
 MSK = timezone(timedelta(hours=3))
 
 FRESH_WINDOW = 1 * 3600       # 1 час
-TOTAL_WINDOW = 12 * 3600      # 12 часов (вместо 24)
+TOTAL_WINDOW = 12 * 3600      # 12 часов
 
 AUTO_REFRESH = 600            # 10 минут
 CACHE_TTL = 600               # кэш на 10 минут
@@ -381,7 +381,7 @@ def parse_ksp_news(name, url):
     return items
 
 # ──────────────────────────────────────────────────────────
-# ДЕДУПЛИКАЦИЯ
+# ДЕДУПЛИКАЦИЯ (двухпроходная)
 # ──────────────────────────────────────────────────────────
 
 def levenshtein(s1, s2):
@@ -406,38 +406,72 @@ def normalize_for_dedup(title):
     words.sort()
     return " ".join(words)
 
-def deduplicate(items, max_diff_minutes=60, max_levenshtein=3):
+def extract_entities(title):
+    entities = set()
+    numbers = re.findall(r'\d+', title)
+    entities.update(numbers)
+    words = title.split()
+    for word in words:
+        if word and word[0].isupper() and len(word) > 1:
+            entities.add(word.lower())
+    abbreviations = re.findall(r'\b[А-ЯЁA-Z]{2,}\b', title)
+    entities.update(a.lower() for a in abbreviations)
+    return entities
+
+def entities_intersect(entities1, entities2):
+    if not entities1 or not entities2:
+        return False
+    return bool(entities1 & entities2)
+
+def deduplicate(items, max_diff_minutes_first=60, max_diff_minutes_second=720, max_levenshtein_first=2, max_levenshtein_second=3):
     if not items:
         return items
-    sorted_items = sorted(items, key=lambda x: x.get("time", "99:99"))
-    result = []
-    seen = []
+
+    sorted_items = sorted(items, key=lambda x: x.get("timestamp", 0) or 0, reverse=True)
+
+    # Первый проход — жёсткий
+    result_first = []
+    seen_first = []
     for item in sorted_items:
         title = item.get("title", "")
-        time_str = item.get("time", "")
+        ts = item.get("timestamp")
         if not title:
-            result.append(item)
+            result_first.append(item)
             continue
         norm = normalize_for_dedup(title)
         is_dup = False
-        for seen_title, seen_time in seen:
-            if levenshtein(norm, seen_title) <= max_levenshtein:
-                if time_str and seen_time:
-                    try:
-                        t1_h, t1_m = map(int, time_str.split(":"))
-                        t2_h, t2_m = map(int, seen_time.split(":"))
-                        if abs((t1_h * 60 + t1_m) - (t2_h * 60 + t2_m)) <= max_diff_minutes:
-                            is_dup = True
-                            break
-                    except:
-                        pass
-                else:
+        for seen_title, seen_ts in seen_first:
+            if levenshtein(norm, seen_title) <= max_levenshtein_first:
+                if ts and seen_ts and abs(ts - seen_ts) <= max_diff_minutes_first * 60:
                     is_dup = True
                     break
         if not is_dup:
-            result.append(item)
-            seen.append((norm, time_str))
-    return result
+            result_first.append(item)
+            seen_first.append((norm, ts))
+
+    # Второй проход — мягкий
+    result_second = []
+    seen_second = []
+    for item in result_first:
+        title = item.get("title", "")
+        ts = item.get("timestamp")
+        if not title:
+            result_second.append(item)
+            continue
+        norm = normalize_for_dedup(title)
+        entities = extract_entities(title)
+        is_dup = False
+        for seen_title, seen_ts, seen_entities in seen_second:
+            if levenshtein(norm, seen_title) <= max_levenshtein_second:
+                if ts and seen_ts and abs(ts - seen_ts) <= max_diff_minutes_second * 60:
+                    if entities and seen_entities and entities_intersect(entities, seen_entities):
+                        is_dup = True
+                        break
+        if not is_dup:
+            result_second.append(item)
+            seen_second.append((norm, ts, entities))
+
+    return result_second
 
 # ──────────────────────────────────────────────────────────
 # ЗАГРУЗКА НОВОСТЕЙ (с кэшем на 10 минут)
@@ -447,33 +481,27 @@ def deduplicate(items, max_diff_minutes=60, max_levenshtein=3):
 def load_news():
     all_items = []
 
-    # RSS
     for name, url in OREL_RSS.items():
         items = parse_rss_items(name, url)
         all_items.extend(items)
 
-    # HTML
     for name, url in HTML_SOURCES.items():
         items = parse_abireg_html(name, url)
         all_items.extend(items)
 
-    # КСП
     ksp_items = parse_ksp_news(
         "Контрольно-счётная палата Орловской области",
         "https://ksp-orel.ru/news/"
     )
     all_items.extend(ksp_items)
 
-    # VK
     if VK_TOKEN:
         for name, screen in VK_CHANNELS.items():
             items = fetch_vk_channel(screen, name)
             all_items.extend(items)
 
-    # Дедупликация
     all_items = deduplicate(all_items)
 
-    # Сортировка по времени
     def sort_key(item):
         ts = item.get("timestamp")
         if ts and isinstance(ts, (int, float)):
@@ -489,7 +517,6 @@ def load_news():
 
     all_items.sort(key=sort_key, reverse=True)
 
-    # Метрики
     now_ts = datetime.now(MSK).timestamp()
     fresh_cutoff = now_ts - FRESH_WINDOW
     total_cutoff = now_ts - TOTAL_WINDOW
