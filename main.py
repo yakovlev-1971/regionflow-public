@@ -5,6 +5,7 @@ import re
 import time
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ──────────────────────────────────────────────────────────
 # КОНФИГУРАЦИЯ
@@ -47,20 +48,20 @@ HTML_SOURCES = {
 }
 
 VK_CHANNELS = {
-    "УМВД по Орловской области": "mvd57",
-    "Жесть Орёл в ВК": "zhest_orel_57",
-    "Инцидент | Орёл в ВК": "orel_onlain",
-    "Интересный город Орел | Орловчане!": "interesting_orel",
-    "Орловский областной суд": "oreloblsud",
-    "Официальная ВК-страница администрации губернатора и правительства Орловской области": "obl_adm_orel",
-    "Правительство Орловской области": "orelregion_government",
-    "Мэрия Орла": "oreladm",
-    "Орловский областной совет народных депутатов": "oblsovet57",
-    "Орловский городской совет народных депутатов": "club207317956",
-    "Орловские новости": "newsorel",
-    "Орловский вестник | новости Орла": "orl_vestnik",
-    "Телеканал «Первый Областной»": "1oblastnoi",
-    "ИнфоОрёл": "infoorel",
+    "УМВД по Орловской области": {"screen": "mvd57", "owner_id": -123456},
+    "Жесть Орёл в ВК": {"screen": "zhest_orel_57", "owner_id": -123456},
+    "Инцидент | Орёл в ВК": {"screen": "orel_onlain", "owner_id": -123456},
+    "Интересный город Орел | Орловчане!": {"screen": "interesting_orel", "owner_id": -123456},
+    "Орловский областной суд": {"screen": "oreloblsud", "owner_id": -123456},
+    "Официальная ВК-страница администрации губернатора и правительства Орловской области": {"screen": "obl_adm_orel", "owner_id": -123456},
+    "Правительство Орловской области": {"screen": "orelregion_government", "owner_id": -123456},
+    "Мэрия Орла": {"screen": "oreladm", "owner_id": -123456},
+    "Орловский областной совет народных депутатов": {"screen": "oblsovet57", "owner_id": -123456},
+    "Орловский городской совет народных депутатов": {"screen": "club207317956", "owner_id": -123456},
+    "Орловские новости": {"screen": "newsorel", "owner_id": -123456},
+    "Орловский вестник | новости Орла": {"screen": "orl_vestnik", "owner_id": -123456},
+    "Телеканал «Первый Областной»": {"screen": "1oblastnoi", "owner_id": -123456},
+    "ИнфоОрёл": {"screen": "infoorel", "owner_id": -123456},
 }
 
 OREL_KEYWORDS = [
@@ -123,6 +124,8 @@ CALL_TO_ACTION_PATTERNS = [
     "бровист", "lashmaker", "ламинирование",
     "барбер", "барбершоп",
     "спа", "салон красоты", "студия красоты",
+    "predloga_orel_bot",
+    "predloga",
 ]
 
 FEDERAL_MARKERS = [
@@ -208,7 +211,7 @@ def parse_rss_items(name, url):
         feed = feedparser.parse(url)
         for entry in feed.entries[:3]:
             title = entry.get("title", "").strip()
-            if title and not is_garbage_title(title):
+            if title:  # Собираем всё, фильтруем позже
                 pub_ts = None
                 pub_time = ""
                 if hasattr(entry, "published_parsed") and entry.published_parsed:
@@ -226,24 +229,21 @@ def parse_rss_items(name, url):
         pass
     return items
 
-def fetch_vk_channel(screen_name, name):
+def fetch_vk_channel(screen_name, name, owner_id, session=None):
     items = []
     try:
-        resolve = requests.get(
-            "https://api.vk.com/method/utils.resolveScreenName",
-            params={"screen_name": screen_name, "access_token": VK_TOKEN, "v": "5.131"},
-            timeout=10
-        ).json()
-        if "error" in resolve or "response" not in resolve or not resolve["response"]:
-            return items
-        owner_id = resolve["response"]["object_id"]
-        if resolve["response"]["type"] == "group":
-            owner_id = -owner_id
-        wall = requests.get(
-            "https://api.vk.com/method/wall.get",
-            params={"owner_id": owner_id, "count": 5, "access_token": VK_TOKEN, "v": "5.131"},
-            timeout=10
-        ).json()
+        url = "https://api.vk.com/method/wall.get"
+        params = {
+            "owner_id": owner_id,
+            "count": 15,
+            "access_token": VK_TOKEN,
+            "v": "5.131"
+        }
+        if session:
+            response = session.get(url, params=params, timeout=10)
+        else:
+            response = requests.get(url, params=params, timeout=10)
+        wall = response.json()
         if "error" in wall or "response" not in wall or "items" not in wall["response"]:
             return items
         for post in wall["response"]["items"]:
@@ -256,7 +256,7 @@ def fetch_vk_channel(screen_name, name):
                 continue
             lines = text.split("\n")
             raw_title = lines[0].strip() if lines else text[:120]
-            if not raw_title or is_garbage_title(raw_title):
+            if not raw_title:  # Собираем всё, фильтруем позже
                 continue
             link = f"https://vk.com/{screen_name}?w=wall{owner_id}_{post['id']}"
             pub_ts = post.get("date", 0)
@@ -305,7 +305,7 @@ def parse_abireg_html(name, url):
                     pub_time = format_time(pub_ts)
                 except:
                     pass
-            if title and not is_garbage_title(title):
+            if title:  # Собираем всё, фильтруем позже
                 items.append({
                     "title": clean_title_display(title),
                     "link": link,
@@ -317,7 +317,7 @@ def parse_abireg_html(name, url):
         pass
     return items
 
-def parse_ksp_news(name, url):
+def parse_ksp_news(name, url, session=None):
     items = []
     try:
         months = {
@@ -325,9 +325,12 @@ def parse_ksp_news(name, url):
             "мая": "05", "июня": "06", "июля": "07", "августа": "08",
             "сентября": "09", "октября": "10", "ноября": "11", "декабря": "12"
         }
-        for page_num in range(1, 3):
+        for page_num in range(1, 2):  # Только первая страница
             page_url = url if page_num == 1 else f"{url}page{page_num}"
-            response = requests.get(page_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            if session:
+                response = session.get(page_url, timeout=5, headers={"User-Agent": "Mozilla/5.0"})
+            else:
+                response = requests.get(page_url, timeout=5, headers={"User-Agent": "Mozilla/5.0"})
             if response.status_code != 200:
                 break
             soup = BeautifulSoup(response.text, "html.parser")
@@ -365,7 +368,7 @@ def parse_ksp_news(name, url):
                     match = re.search(r'(\d{1,2})\s+([а-я]+)\s+(\d{4})', date_text)
                     if match:
                         sort_date = f"{match.group(3)}-{months.get(match.group(2), '01')}-{match.group(1).zfill(2)}"
-                if title and not is_garbage_title(title):
+                if title:  # Собираем всё, фильтруем позже
                     items.append({
                         "title": clean_title_display(title),
                         "link": link,
@@ -478,27 +481,69 @@ def deduplicate(items, max_diff_minutes_first=60, max_diff_minutes_second=720, m
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def load_news():
     all_items = []
+    source_status = {}
+    
+    session = requests.Session()
+    session.headers.update({"User-Agent": "RegionFlow/1.0"})
 
-    for name, url in OREL_RSS.items():
-        items = parse_rss_items(name, url)
-        all_items.extend(items)
+    def fetch_rss(name, url):
+        try:
+            items = parse_rss_items(name, url)
+            return name, items, "Работает" if items else "Недоступен"
+        except:
+            return name, [], "Недоступен"
 
-    for name, url in HTML_SOURCES.items():
-        items = parse_abireg_html(name, url)
-        all_items.extend(items)
+    def fetch_html(name, url):
+        try:
+            items = parse_abireg_html(name, url)
+            return name, items, "Работает" if items else "Недоступен"
+        except:
+            return name, [], "Недоступен"
 
-    ksp_items = parse_ksp_news(
-        "Контрольно-счётная палата Орловской области",
-        "https://ksp-orel.ru/news/"
-    )
-    all_items.extend(ksp_items)
+    def fetch_ksp():
+        try:
+            items = parse_ksp_news(
+                "Контрольно-счётная палата Орловской области",
+                "https://ksp-orel.ru/news/",
+                session=session
+            )
+            return "Контрольно-счётная палата Орловской области", items, "Работает" if items else "Недоступен"
+        except:
+            return "Контрольно-счётная палата Орловской области", [], "Недоступен"
 
-    if VK_TOKEN:
-        for name, screen in VK_CHANNELS.items():
-            items = fetch_vk_channel(screen, name)
+    def fetch_vk(name, config):
+        try:
+            items = fetch_vk_channel(
+                config["screen"], name, config["owner_id"], session=session
+            )
+            status = "Работает" if items else "Свежих новостей нет"
+            return name, items, status
+        except:
+            return name, [], "Недоступен"
+
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        futures = []
+        
+        for name, url in OREL_RSS.items():
+            futures.append(executor.submit(fetch_rss, name, url))
+            
+        for name, url in HTML_SOURCES.items():
+            futures.append(executor.submit(fetch_html, name, url))
+            
+        futures.append(executor.submit(fetch_ksp))
+        
+        for name, config in VK_CHANNELS.items():
+            futures.append(executor.submit(fetch_vk, name, config))
+
+        for future in as_completed(futures):
+            name, items, status = future.result()
             all_items.extend(items)
+            source_status[name] = status
 
+    total_raw = len(all_items)
+    all_items = [item for item in all_items if not is_garbage_title(item.get("title", ""))]
     all_items = deduplicate(all_items)
+    total_clean = len(all_items)
 
     def sort_key(item):
         ts = item.get("timestamp")
@@ -546,8 +591,11 @@ def load_news():
 
     return {
         "chrono_items": chrono_items,
-        "total_count": total_count,
+        "total_count": total_clean,
         "fresh_count": fresh_count,
+        "total_raw": total_raw,
+        "total_clean": total_clean,
+        "source_status": source_status,
         "timestamp": datetime.now(MSK).strftime("%d %B %Y, %H:%M MSK")
     }
 
@@ -615,6 +663,10 @@ st.markdown(f"""
     <div class="metric-box">
         <div class="metric-number">{data['total_count']}</div>
         <div class="metric-label">Всего за 12 часов</div>
+    </div>
+    <div class="metric-box">
+        <div class="metric-number">{data['total_raw']}</div>
+        <div class="metric-label">До фильтрации</div>
     </div>
 </div>
 """, unsafe_allow_html=True)
